@@ -1,0 +1,28 @@
+# API
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.34
+pydantic==2.14.4
+pydantic-settings==2.16.3
+python-dotenv==1.2.4
+httpx==0.28.1
+
+# Base de données
+sqlalchemy==2.1.9
+alembic==1.20.1
+psycopg[binary]==3.3.9
+
+# File de jobs
+redis==8.2.0
+rq==3.0.0
+
+# Pipeline vidéo (FFmpeg doit être installé sur le système)
+yt-dlp==2026.10.26
+ffmpeg-python==0.2.0
+
+# IA : Whisper API, GPT-4o, TTS
+openai==3.57.0
+elevenlabs==2.79.0
+
+# Whisper en local (optionnel, installe PyTorch, ~2 Go) :
+# openai-whisper==20250625
