@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 
 from app.core.config import Settings, get_settings
+from app.core.providers import ProviderConfigError, resolve_ai_profile
 from app.jobs.store import InMemoryJobStore, JobNotFoundError, get_job_store
 from app.models.schemas import JobState, ProcessVideoRequest, ProcessVideoResponse
 from app.pipeline import runner
@@ -32,10 +33,10 @@ def process_video(
     store: StoreDep,
     settings: SettingsDep,
 ) -> ProcessVideoResponse:
-    if not settings.openai_api_key:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY n'est pas configurée."
-        )
+    try:
+        resolve_ai_profile(settings)
+    except ProviderConfigError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     job = store.create(str(request.url), request.commentary_mode)
     background_tasks.add_task(
         runner.run_pipeline, job.job_id, job.url, job.commentary_mode, store, settings

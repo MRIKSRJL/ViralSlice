@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -9,11 +10,21 @@ OPENAI_TTS_INSTRUCTIONS = (
 )
 
 
-def synthesize_voiceover(text: str, output: Path, settings: Settings, openai_client: Any) -> Path:
-    """Génère la voix off en MP3 avec le fournisseur configuré (`TTS_PROVIDER`)."""
+def synthesize_voiceover(
+    text: str,
+    output: Path,
+    settings: Settings,
+    provider: str,
+    openai_client: Any = None,
+) -> Path:
+    """Génère la voix off en MP3 avec `provider` : "openai", "elevenlabs" ou "edge"."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    if settings.tts_provider == "elevenlabs":
+    if provider == "edge":
+        return _synthesize_edge(text, output, settings)
+    if provider == "elevenlabs":
         return _synthesize_elevenlabs(text, output, settings)
+    if openai_client is None:
+        raise PipelineError("La voix off OpenAI exige un client OpenAI.")
 
     params: dict[str, Any] = {
         "model": settings.openai_tts_model,
@@ -25,6 +36,28 @@ def synthesize_voiceover(text: str, output: Path, settings: Settings, openai_cli
         params["instructions"] = OPENAI_TTS_INSTRUCTIONS
     response = openai_client.audio.speech.create(**params)
     response.write_to_file(output)
+    return output
+
+
+def _synthesize_edge(text: str, output: Path, settings: Settings) -> Path:
+    """edge-tts : voix neuronales Microsoft Edge, sans compte ni clé.
+
+    Les voix « Multilingual » lisent le texte dans sa langue, quelle que soit leur locale.
+    """
+    import edge_tts
+
+    async def _save() -> None:
+        communicate = edge_tts.Communicate(
+            text, settings.edge_tts_voice, rate=settings.edge_tts_rate
+        )
+        await communicate.save(str(output))
+
+    try:
+        asyncio.run(_save())
+    except Exception as exc:
+        raise PipelineError(f"Voix off edge-tts impossible : {exc}") from exc
+    if not output.exists() or output.stat().st_size == 0:
+        raise PipelineError("edge-tts n'a produit aucun audio.")
     return output
 
 

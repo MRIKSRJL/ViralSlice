@@ -11,7 +11,7 @@ import pytest
 from app.core.config import Settings
 from app.jobs.store import InMemoryJobStore
 from app.models.schemas import CommentaryMode, JobStatus, Word
-from app.pipeline import download, runner
+from app.pipeline import download, runner, tts
 from app.pipeline.download import DownloadedVideo
 from app.pipeline.editing import build_render_command
 from app.pipeline.ffmpeg_utils import probe_duration, run_command
@@ -58,6 +58,7 @@ def mean_volume(path: Path, start: float, duration: float) -> float:
 class FakeOpenAI:
     def __init__(self, moments_payload: dict):
         self.transcription_calls: list[dict] = []
+        self.chat_calls: list[dict] = []
         self.moments_payload = moments_payload
         self.audio = SimpleNamespace(
             transcriptions=SimpleNamespace(create=self._transcribe),
@@ -76,6 +77,7 @@ class FakeOpenAI:
         return SimpleNamespace(text="", words=[SimpleNamespace(**w) for w in words])
 
     def _chat(self, **kwargs):
+        self.chat_calls.append(kwargs)
         content = json.dumps(self.moments_payload)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
@@ -163,3 +165,51 @@ def test_subtitles_burn_with_special_characters_in_path(tmp_path):
         output=output, preset="ultrafast", fonts_dir=weird,
     ))  # fmt: skip
     assert probe_stream(output, "v:0")["height"] == 1920
+
+
+def test_free_groq_profile_uses_groq_models_and_edge_tts(tmp_path, monkeypatch):
+    source = make_source(tmp_path / "source.mp4", seconds=40)
+
+    def fake_download(url, dest_dir, max_duration_seconds, cookies_file=None):
+        target = Path(dest_dir) / "source.mp4"
+        shutil.copy(source, target)
+        return DownloadedVideo(path=target, title="Vidéo test", duration=40)
+
+    edge_calls = []
+
+    def fake_edge(text, output, settings):
+        edge_calls.append(text)
+        run_command([
+            "ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+            "-i", "sine=frequency=880:duration=3", "-c:a", "libmp3lame", str(output),
+        ])  # fmt: skip
+        return output
+
+    monkeypatch.setattr(download, "download_video", fake_download)
+    monkeypatch.setattr(tts, "_synthesize_edge", fake_edge)
+    fake = FakeOpenAI({
+        "moments": [
+            {"start": 2, "end": 34, "title": "A", "reason": "r", "needs_commentary": True,
+             "commentary_script": "Attendez de voir la suite"},
+        ]
+    })  # fmt: skip
+    settings = Settings(
+        _env_file=None,
+        openai_api_key="",
+        groq_api_key="gsk_test",
+        media_root=tmp_path / "media",
+        video_preset="ultrafast",
+    )
+    store = InMemoryJobStore()
+    job = store.create("https://youtu.be/abc", CommentaryMode.AUTO)
+
+    runner.run_pipeline(job.job_id, job.url, CommentaryMode.AUTO, store, settings, client=fake)
+
+    state = store.get(job.job_id)
+    assert state.error is None and state.status is JobStatus.COMPLETED
+    assert state.clips[0].has_voiceover
+    assert edge_calls == ["Attendez de voir la suite"]
+    assert [c["model"] for c in fake.transcription_calls] == ["whisper-large-v3-turbo"] * 2
+    assert all(c["timestamp_granularities"] == ["word"] for c in fake.transcription_calls)
+    assert fake.chat_calls[0]["model"] == "openai/gpt-oss-120b"
+    assert fake.chat_calls[0]["reasoning_effort"] == "low"

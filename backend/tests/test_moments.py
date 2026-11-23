@@ -7,9 +7,11 @@ from app.models.schemas import CommentaryMode, Word
 from app.pipeline.errors import LLMResponseError
 from app.pipeline.moments import (
     MOMENTS_JSON_SCHEMA,
+    OMISSION_MARKER,
     build_messages,
     build_transcript_lines,
     detect_viral_moments,
+    fit_transcript_lines,
     parse_moments_response,
 )
 
@@ -138,3 +140,47 @@ def test_detect_viral_moments_retries_once_on_bad_json():
     fmt = completions.calls[0]["response_format"]
     assert fmt["type"] == "json_schema" and fmt["json_schema"]["strict"] is True
     assert completions.calls[0]["model"] == "gpt-4o"
+
+
+def test_fit_transcript_lines_keeps_short_transcripts_intact():
+    lines = ["[0.0-1.0] a", "[1.0-2.0] b"]
+    assert fit_transcript_lines(lines, None) == (lines, False)
+    assert fit_transcript_lines(lines, 1000) == (lines, False)
+
+
+def test_fit_transcript_lines_samples_every_block_within_budget():
+    lines = [f"[{i}.0-{i}.9] " + "mot " * 12 for i in range(600)]
+    kept, truncated = fit_transcript_lines(lines, 6000, block_size=60)
+    assert truncated
+    assert sum(len(line) + 1 for line in kept) <= 6000
+    assert kept.count(OMISSION_MARKER) == 10
+    for block_start in range(0, 600, 60):
+        assert lines[block_start] in kept
+    # Les extraits gardés sont contigus : chaque bloc commence par plusieurs lignes consécutives.
+    first = kept.index(lines[60])
+    assert kept[first : first + 3] == lines[60:63]
+
+
+def test_truncated_transcript_is_flagged_in_prompt():
+    words = [Word(text=f"mot{i}", start=i * 0.5, end=i * 0.5 + 0.4) for i in range(3000)]
+    messages = build_messages(words, 1500, CommentaryMode.AUTO, max_transcript_chars=4000)
+    assert len(messages[1]["content"]) < 4400
+    assert "must never span an omission" in messages[1]["content"]
+    assert "omission" not in build_messages(words[:20], 10, CommentaryMode.AUTO, 4000)[1]["content"]
+
+
+def test_detect_viral_moments_forwards_provider_options():
+    completions = FakeCompletions([payload(moment(0, 40))])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    detect_viral_moments(
+        client,
+        "openai/gpt-oss-120b",
+        [],
+        600,
+        CommentaryMode.AUTO,
+        llm_options={"reasoning_effort": "low"},
+    )
+    call = completions.calls[0]
+    assert call["model"] == "openai/gpt-oss-120b"
+    assert call["reasoning_effort"] == "low"
+    assert call["response_format"]["json_schema"]["strict"] is True
