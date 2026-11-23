@@ -4,6 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
+from app.core.providers import (
+    AIProfile,
+    create_ai_client,
+    create_openai_tts_client,
+    resolve_ai_profile,
+)
 from app.jobs.store import InMemoryJobStore
 from app.models.schemas import ClipResult, CommentaryMode, JobStatus, ViralMoment, Word
 from app.pipeline import download
@@ -20,12 +26,6 @@ from app.pipeline.tts import synthesize_voiceover
 logger = logging.getLogger(__name__)
 
 
-def create_openai_client(settings: Settings) -> Any:
-    from openai import OpenAI
-
-    return OpenAI(api_key=settings.openai_api_key, max_retries=3)
-
-
 def clip_download_url(job_id: str, index: int) -> str:
     return f"/api/jobs/{job_id}/clips/{index}"
 
@@ -40,7 +40,9 @@ def render_clip(
     work_dir: Path,
     output_dir: Path,
     settings: Settings,
+    profile: AIProfile,
     client: Any,
+    tts_client: Any,
 ) -> ClipResult:
     clip_dir = work_dir / f"clip_{index}"
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -50,9 +52,13 @@ def render_clip(
     voiceover: Path | None = None
     if moment.needs_commentary and moment.commentary_script:
         voiceover = synthesize_voiceover(
-            moment.commentary_script, clip_dir / "voiceover.mp3", settings, client
+            moment.commentary_script,
+            clip_dir / "voiceover.mp3",
+            settings,
+            profile.tts_provider,
+            tts_client,
         )
-        vo_words = transcribe_words(client, voiceover, settings.openai_transcription_model)
+        vo_words = transcribe_words(client, voiceover, profile.transcription_model)
         subtitle_words = merge_voiceover_words(subtitle_words, vo_words, duration)
 
     style = SubtitleStyle(font_name=settings.subtitle_font)
@@ -100,7 +106,11 @@ def run_pipeline(
     """Exécute le pipeline complet d'un job et met à jour son état à chaque étape."""
     output_dir = settings.media_root / job_id
     try:
-        client = client or create_openai_client(settings)
+        profile = resolve_ai_profile(settings)
+        client = client or create_ai_client(profile)
+        tts_client = None
+        if profile.tts_provider == "openai":
+            tts_client = client if profile.name == "openai" else create_openai_tts_client(settings)
         output_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=f"viralslice-{job_id}-") as tmp:
             work_dir = Path(tmp)
@@ -125,13 +135,19 @@ def run_pipeline(
                 settings.whisper_max_upload_bytes,
                 settings.whisper_chunk_seconds,
             )
-            words = transcribe_chunks(client, chunks, settings.openai_transcription_model)
+            words = transcribe_chunks(client, chunks, profile.transcription_model)
             if not words:
                 raise PipelineError("Aucune parole détectée dans la vidéo.")
 
             store.update(job_id, status=JobStatus.DETECTING_MOMENTS, progress=35)
             moments = detect_viral_moments(
-                client, settings.openai_llm_model, words, video.duration, commentary_mode
+                client,
+                profile.llm_model,
+                words,
+                video.duration,
+                commentary_mode,
+                llm_options=profile.llm_options,
+                max_transcript_chars=profile.max_transcript_chars,
             )
 
             store.update(job_id, status=JobStatus.RENDERING, progress=45, moments=moments)
@@ -147,7 +163,9 @@ def run_pipeline(
                         work_dir=work_dir,
                         output_dir=output_dir,
                         settings=settings,
+                        profile=profile,
                         client=client,
+                        tts_client=tts_client,
                     )
                 )
                 store.update(job_id, progress=45 + round(55 * i / len(moments)), clips=clips)

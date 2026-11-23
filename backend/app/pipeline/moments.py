@@ -105,8 +105,43 @@ def build_transcript_lines(
     return lines
 
 
+OMISSION_MARKER = "[...]"
+
+
+def fit_transcript_lines(
+    lines: list[str], max_chars: int | None, block_size: int = 60
+) -> tuple[list[str], bool]:
+    """Réduit la transcription à `max_chars` en gardant le début de chaque bloc de lignes.
+
+    Toute la durée de la vidéo reste représentée par des extraits contigus (plusieurs
+    minutes par bloc), séparés par `OMISSION_MARKER`. Retourne (lignes, tronquée ?).
+    """
+    total = sum(len(line) + 1 for line in lines)
+    if max_chars is None or total <= max_chars:
+        return lines, False
+    blocks = [lines[i : i + block_size] for i in range(0, len(lines), block_size)]
+    ratio = max(0.0, max_chars - len(blocks) * (len(OMISSION_MARKER) + 1)) / total
+    kept: list[str] = []
+    for block in blocks:
+        budget = sum(len(line) + 1 for line in block) * ratio
+        used = 0
+        taken = 0
+        for line in block:
+            if used + len(line) + 1 > budget:
+                break
+            kept.append(line)
+            used += len(line) + 1
+            taken += 1
+        if taken < len(block):
+            kept.append(OMISSION_MARKER)
+    return kept, True
+
+
 def build_messages(
-    words: list[Word], video_duration: float, mode: CommentaryMode
+    words: list[Word],
+    video_duration: float,
+    mode: CommentaryMode,
+    max_transcript_chars: int | None = None,
 ) -> list[dict[str, str]]:
     system = SYSTEM_PROMPT.format(
         count=CLIP_COUNT,
@@ -114,8 +149,17 @@ def build_messages(
         max_s=MAX_CLIP_SECONDS,
         mode_instructions=_MODE_INSTRUCTIONS[mode],
     )
-    transcript = "\n".join(build_transcript_lines(words))
-    user = f"Video duration: {video_duration:.1f} s\n\nTranscript:\n{transcript}"
+    lines, truncated = fit_transcript_lines(build_transcript_lines(words), max_transcript_chars)
+    if truncated:
+        logger.warning("Transcription réduite à %s caractères pour le LLM", max_transcript_chars)
+    note = (
+        f"\nParts of the transcript were omitted and replaced by {OMISSION_MARKER}; "
+        "a moment must never span an omission."
+        if truncated
+        else ""
+    )
+    transcript = "\n".join(lines)
+    user = f"Video duration: {video_duration:.1f} s{note}\n\nTranscript:\n{transcript}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -226,8 +270,11 @@ def detect_viral_moments(
     video_duration: float,
     mode: CommentaryMode,
     attempts: int = 2,
+    *,
+    llm_options: dict[str, Any] | None = None,
+    max_transcript_chars: int | None = None,
 ) -> list[ViralMoment]:
-    messages = build_messages(words, video_duration, mode)
+    messages = build_messages(words, video_duration, mode, max_transcript_chars)
     last_error: LLMResponseError | None = None
     for _ in range(attempts):
         completion = client.chat.completions.create(
@@ -235,6 +282,7 @@ def detect_viral_moments(
             messages=messages,
             response_format={"type": "json_schema", "json_schema": MOMENTS_JSON_SCHEMA},
             temperature=0.4,
+            **(llm_options or {}),
         )
         content = completion.choices[0].message.content or ""
         try:

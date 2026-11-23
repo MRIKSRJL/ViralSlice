@@ -79,16 +79,28 @@ def test_process_video_rejects_invalid_input(client, body):
     assert client.post("/api/process-video", json=body).status_code == 422
 
 
-def test_process_video_requires_openai_key(store, tmp_path):
+def _post_with_settings(store, settings):
     app.dependency_overrides[get_job_store] = lambda: store
-    app.dependency_overrides[get_settings] = lambda: Settings(
-        openai_api_key="", media_root=tmp_path
-    )
+    app.dependency_overrides[get_settings] = lambda: settings
     try:
-        response = TestClient(app).post("/api/process-video", json={"url": "https://youtu.be/abc"})
+        return TestClient(app).post("/api/process-video", json={"url": "https://youtu.be/abc"})
     finally:
         app.dependency_overrides.clear()
+
+
+def test_process_video_requires_an_ai_key(store, tmp_path):
+    settings = Settings(_env_file=None, openai_api_key="", groq_api_key="", media_root=tmp_path)
+    response = _post_with_settings(store, settings)
     assert response.status_code == 503
+    assert "GROQ_API_KEY" in response.json()["detail"]
+
+
+def test_process_video_accepts_free_groq_key(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "run_pipeline", lambda *args: None)
+    settings = Settings(
+        _env_file=None, openai_api_key="", groq_api_key="gsk_test", media_root=tmp_path
+    )
+    assert _post_with_settings(store, settings).status_code == 202
 
 
 def test_unknown_job_returns_404(client):

@@ -12,13 +12,27 @@ class Settings(BaseSettings):
     app_env: str = "development"
     cors_origins: str = "http://localhost:3000"
 
+    # Vide = automatique : OpenAI si OPENAI_API_KEY est renseignée, sinon Groq.
+    ai_provider: Literal["openai", "groq"] | None = None
+
     openai_api_key: str = ""
     openai_llm_model: str = "gpt-4o"
     openai_transcription_model: str = "whisper-1"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
 
-    tts_provider: Literal["openai", "elevenlabs"] = "openai"
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_llm_model: str = "openai/gpt-oss-120b"
+    groq_transcription_model: str = "whisper-large-v3-turbo"
+    groq_reasoning_effort: Literal["low", "medium", "high"] | None = "low"
+    # L'offre gratuite de Groq limite gpt-oss à 8 000 tokens par minute (prompt + réponse).
+    groq_max_transcript_chars: int = 14_000
+
+    # Vide = automatique : "openai" avec OpenAI, "edge" (edge-tts, gratuit) avec Groq.
+    tts_provider: Literal["openai", "elevenlabs", "edge"] | None = None
+    edge_tts_voice: str = "fr-FR-RemyMultilingualNeural"
+    edge_tts_rate: str = "+8%"
     elevenlabs_api_key: str = ""
     elevenlabs_voice_id: str = ""
     elevenlabs_model_id: str = "eleven_multilingual_v2"
@@ -42,9 +56,16 @@ class Settings(BaseSettings):
     whisper_max_upload_bytes: int = 24 * 1024 * 1024
     whisper_chunk_seconds: int = 1200
 
-    @field_validator("ytdlp_cookies_file", "fonts_dir", mode="before")
+    @field_validator(
+        "ytdlp_cookies_file",
+        "fonts_dir",
+        "ai_provider",
+        "tts_provider",
+        "groq_reasoning_effort",
+        mode="before",
+    )
     @classmethod
-    def _empty_path_is_none(cls, value: object) -> object:
+    def _empty_is_none(cls, value: object) -> object:
         return None if value == "" else value
 
     @property
